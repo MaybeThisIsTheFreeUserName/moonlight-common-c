@@ -1,6 +1,7 @@
 #include "Limelight-internal.h"
 
 #if defined(__linux__) && defined(SO_TIMESTAMPNS)
+#include <sys/uio.h>
 #include <time.h>
 #endif
 
