@@ -1,5 +1,9 @@
 #include "Limelight-internal.h"
 
+#if defined(__linux__) && defined(SO_TIMESTAMPNS)
+#include <time.h>
+#endif
+
 #define TEST_PORT_TIMEOUT_SEC 3
 
 #define RCV_BUFFER_SIZE_MIN  32767
@@ -179,8 +183,81 @@ bool isSocketReadable(SOCKET s) {
     return true;
 }
 
-int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
+bool enableSocketReceiveTimestamping(SOCKET s) {
+#if defined(__linux__) && defined(SO_TIMESTAMPNS)
+    int enabled = 1;
+    return setsockopt(s, SOL_SOCKET, SO_TIMESTAMPNS, (char*)&enabled, sizeof(enabled)) == 0;
+#else
+    (void)s;
+    return false;
+#endif
+}
+
+static int recvUdpSocketPacket(SOCKET s, char* buffer, int size,
+                               uint64_t* kernelReceiveTimestampUs, uint64_t* receiveReturnRealtimeUs) {
+#if defined(__linux__) && defined(SO_TIMESTAMPNS)
+    if (kernelReceiveTimestampUs != NULL) {
+        struct iovec iov;
+        struct msghdr msg;
+        struct cmsghdr* cmsg;
+        struct timespec receiveReturnTime;
+        union {
+            struct cmsghdr align;
+            char data[CMSG_SPACE(sizeof(struct timespec))];
+        } control;
+
+        memset(&msg, 0, sizeof(msg));
+        memset(&control, 0, sizeof(control));
+        iov.iov_base = buffer;
+        iov.iov_len = size;
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.data;
+        msg.msg_controllen = sizeof(control.data);
+
+        int err = (int)recvmsg(s, &msg, 0);
+        if (err >= 0) {
+            for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+                if (cmsg->cmsg_level == SOL_SOCKET &&
+                        cmsg->cmsg_type == SO_TIMESTAMPNS &&
+                        cmsg->cmsg_len >= CMSG_LEN(sizeof(struct timespec))) {
+                    struct timespec kernelReceiveTime;
+                    memcpy(&kernelReceiveTime, CMSG_DATA(cmsg), sizeof(kernelReceiveTime));
+                    *kernelReceiveTimestampUs =
+                            (uint64_t)kernelReceiveTime.tv_sec * 1000000ULL +
+                            (uint64_t)kernelReceiveTime.tv_nsec / 1000ULL;
+                    break;
+                }
+            }
+
+            if (receiveReturnRealtimeUs != NULL &&
+                    clock_gettime(CLOCK_REALTIME, &receiveReturnTime) == 0) {
+                *receiveReturnRealtimeUs =
+                        (uint64_t)receiveReturnTime.tv_sec * 1000000ULL +
+                        (uint64_t)receiveReturnTime.tv_nsec / 1000ULL;
+            }
+        }
+
+        return err;
+    }
+#else
+    (void)kernelReceiveTimestampUs;
+    (void)receiveReturnRealtimeUs;
+#endif
+
+    return (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+}
+
+int recvUdpSocketWithTimestamp(SOCKET s, char* buffer, int size, bool useSelect,
+                               uint64_t* kernelReceiveTimestampUs, uint64_t* receiveReturnRealtimeUs) {
     int err;
+
+    if (kernelReceiveTimestampUs != NULL) {
+        *kernelReceiveTimestampUs = 0;
+    }
+    if (receiveReturnRealtimeUs != NULL) {
+        *receiveReturnRealtimeUs = 0;
+    }
 
     do {
         if (useSelect) {
@@ -196,13 +273,15 @@ int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
             }
 
             // This won't block since the socket is readable
-            err = (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+            err = recvUdpSocketPacket(s, buffer, size,
+                                      kernelReceiveTimestampUs, receiveReturnRealtimeUs);
         }
         else {
             // The caller has already configured a timeout on this
             // socket via SO_RCVTIMEO, so we can avoid a syscall
             // for each packet.
-            err = (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+            err = recvUdpSocketPacket(s, buffer, size,
+                                      kernelReceiveTimestampUs, receiveReturnRealtimeUs);
             if (err < 0 &&
                     (LastSocketError() == EWOULDBLOCK ||
                      LastSocketError() == EINTR ||
@@ -229,6 +308,10 @@ int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
 #endif
 
     return err;
+}
+
+int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
+    return recvUdpSocketWithTimestamp(s, buffer, size, useSelect, NULL, NULL);
 }
 
 void closeSocket(SOCKET s) {
