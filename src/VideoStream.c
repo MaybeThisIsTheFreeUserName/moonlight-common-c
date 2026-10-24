@@ -22,7 +22,9 @@ static bool receivedFullFrame;
 
 // Diagnostic-only packet receive timing. Log only outliers to keep overhead low.
 static uint64_t diagPreviousReceiveReturnUs;
+static uint64_t diagPreviousKernelReceiveUs;
 static uint64_t diagPreviousPacketProcessUs;
+static bool diagSocketTimestampingEnabled;
 
 // We can't request an IDR frame until the depacketizer knows
 // that a packet was lost. This timeout bounds the time that
@@ -46,6 +48,10 @@ void initializeVideoStream(void) {
     receivedDataFromPeer = false;
     firstDataTimeMs = 0;
     receivedFullFrame = false;
+    diagPreviousReceiveReturnUs = 0;
+    diagPreviousKernelReceiveUs = 0;
+    diagPreviousPacketProcessUs = 0;
+    diagSocketTimestampingEnabled = false;
 }
 
 // Clean up the video stream
@@ -138,13 +144,24 @@ static void VideoReceiveThreadProc(void* context) {
             }
         }
 
-        err = recvUdpSocket(rtpSocket,
-                            encrypted ? encryptedBuffer : buffer,
-                            receiveSize,
-                            useSelect);
+        uint64_t diagKernelReceiveUs = 0;
+        uint64_t diagReceiveReturnRealtimeUs = 0;
+        err = recvUdpSocketWithTimestamp(rtpSocket,
+                                         encrypted ? encryptedBuffer : buffer,
+                                         receiveSize,
+                                         useSelect,
+                                         diagSocketTimestampingEnabled ? &diagKernelReceiveUs : NULL,
+                                         diagSocketTimestampingEnabled ? &diagReceiveReturnRealtimeUs : NULL);
         uint64_t diagReceiveReturnUs = PltGetMicroseconds();
         uint64_t diagReceiveGapUs = diagPreviousReceiveReturnUs != 0 ?
                 diagReceiveReturnUs - diagPreviousReceiveReturnUs : 0;
+        uint64_t diagKernelReceiveGapUs =
+                diagKernelReceiveUs != 0 && diagPreviousKernelReceiveUs != 0 &&
+                diagKernelReceiveUs >= diagPreviousKernelReceiveUs ?
+                diagKernelReceiveUs - diagPreviousKernelReceiveUs : 0;
+        uint64_t diagKernelToUserUs =
+                diagKernelReceiveUs != 0 && diagReceiveReturnRealtimeUs >= diagKernelReceiveUs ?
+                diagReceiveReturnRealtimeUs - diagKernelReceiveUs : 0;
         uint64_t diagPreviousProcessUs = diagPreviousPacketProcessUs;
         if (err < 0) {
             Limelog("Video Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
@@ -165,6 +182,11 @@ static void VideoReceiveThreadProc(void* context) {
 
             // Receive timed out; try again
             continue;
+        }
+
+        diagPreviousReceiveReturnUs = diagReceiveReturnUs;
+        if (diagKernelReceiveUs != 0) {
+            diagPreviousKernelReceiveUs = diagKernelReceiveUs;
         }
 
         if (!receivedDataFromPeer) {
@@ -244,15 +266,21 @@ static void VideoReceiveThreadProc(void* context) {
         queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
         uint64_t diagProcessUs = PltGetMicroseconds() - diagReceiveReturnUs;
 
-        if (diagReceiveGapUs >= 30000 || diagProcessUs >= 5000 || diagPreviousProcessUs >= 5000) {
-            Limelog("DIAG_VIDEO_RX t_us=%llu gap_us=%llu prev_process_us=%llu process_us=%llu seq=%u frame=%u bytes=%d queue_status=%d\n",
+        if (diagReceiveGapUs >= 30000 ||
+                diagKernelReceiveGapUs >= 30000 ||
+                diagKernelToUserUs >= 5000 ||
+                diagProcessUs >= 5000 ||
+                diagPreviousProcessUs >= 5000) {
+            Limelog("DIAG_VIDEO_RX t_us=%llu gap_us=%llu kernel_rx_us=%llu kernel_gap_us=%llu kernel_to_user_us=%llu prev_process_us=%llu process_us=%llu seq=%u frame=%u bytes=%d queue_status=%d\n",
                     (unsigned long long)diagReceiveReturnUs,
                     (unsigned long long)diagReceiveGapUs,
+                    (unsigned long long)diagKernelReceiveUs,
+                    (unsigned long long)diagKernelReceiveGapUs,
+                    (unsigned long long)diagKernelToUserUs,
                     (unsigned long long)diagPreviousProcessUs,
                     (unsigned long long)diagProcessUs,
                     packet->sequenceNumber, diagFrameIndex, err, queueStatus);
         }
-        diagPreviousReceiveReturnUs = diagReceiveReturnUs;
         diagPreviousPacketProcessUs = diagProcessUs;
 
         if (queueStatus == RTPF_RET_QUEUED) {
@@ -361,6 +389,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
         VideoCallbacks.cleanup();
         return LastSocketError();
     }
+
+    diagSocketTimestampingEnabled = enableSocketReceiveTimestamping(rtpSocket);
+    Limelog("DIAG_VIDEO_RX_TIMESTAMPING enabled=%d\n", diagSocketTimestampingEnabled ? 1 : 0);
 
     VideoCallbacks.start();
 
