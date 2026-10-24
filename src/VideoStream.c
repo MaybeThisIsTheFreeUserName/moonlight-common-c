@@ -20,6 +20,10 @@ static bool receivedDataFromPeer;
 static uint64_t firstDataTimeMs;
 static bool receivedFullFrame;
 
+// Diagnostic-only packet receive timing. Log only outliers to keep overhead low.
+static uint64_t diagPreviousReceiveReturnUs;
+static uint64_t diagPreviousPacketProcessUs;
+
 // We can't request an IDR frame until the depacketizer knows
 // that a packet was lost. This timeout bounds the time that
 // the RTP queue will wait for missing/reordered packets.
@@ -138,6 +142,10 @@ static void VideoReceiveThreadProc(void* context) {
                             encrypted ? encryptedBuffer : buffer,
                             receiveSize,
                             useSelect);
+        uint64_t diagReceiveReturnUs = PltGetMicroseconds();
+        uint64_t diagReceiveGapUs = diagPreviousReceiveReturnUs != 0 ?
+                diagReceiveReturnUs - diagPreviousReceiveReturnUs : 0;
+        uint64_t diagPreviousProcessUs = diagPreviousPacketProcessUs;
         if (err < 0) {
             Limelog("Video Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
             ListenerCallbacks.connectionTerminated(LastSocketFail());
@@ -227,7 +235,25 @@ static void VideoReceiveThreadProc(void* context) {
         packet->timestamp = BE32(packet->timestamp);
         packet->ssrc = BE32(packet->ssrc);
 
+        uint32_t diagFrameIndex = 0;
+        int diagPayloadOffset = sizeof(*packet) + ((packet->header & FLAG_EXTENSION) ? 4 : 0);
+        if (err >= diagPayloadOffset + (int)sizeof(NV_VIDEO_PACKET)) {
+            PNV_VIDEO_PACKET diagNvPacket = (PNV_VIDEO_PACKET)(((char*)packet) + diagPayloadOffset);
+            diagFrameIndex = LE32(diagNvPacket->frameIndex);
+        }
+        uint64_t diagProcessStartUs = diagReceiveReturnUs;
         queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
+        uint64_t diagProcessUs = PltGetMicroseconds() - diagProcessStartUs;
+
+        if (diagReceiveGapUs >= 30000 || diagProcessUs >= 5000 || diagPreviousProcessUs >= 5000) {
+            Limelog("DIAG_VIDEO_RX gap_us=%llu prev_process_us=%llu process_us=%llu seq=%u frame=%u bytes=%d queue_status=%d\\n",
+                    (unsigned long long)diagReceiveGapUs,
+                    (unsigned long long)diagPreviousProcessUs,
+                    (unsigned long long)diagProcessUs,
+                    packet->sequenceNumber, diagFrameIndex, err, queueStatus);
+        }
+        diagPreviousReceiveReturnUs = diagReceiveReturnUs;
+        diagPreviousPacketProcessUs = diagProcessUs;
 
         if (queueStatus == RTPF_RET_QUEUED) {
             // The queue owns the buffer
