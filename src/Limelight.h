@@ -164,6 +164,12 @@ typedef struct _DECODE_UNIT {
     // can be calculated. This value is in microseconds.
     uint64_t enqueueTimeUs;
 
+    // Native diagnostic timestamps for the decode-unit queue. Zero/negative values
+    // indicate that the decode unit was submitted directly without queueing.
+    uint64_t dequeueTimeUs;
+    int queueDepthAtEnqueue;
+    int queueDepthAfterDequeue;
+
     // Presentation time in microseconds with the epoch at the first captured frame.
     // This can be used to aid frame pacing or to drop old frames that were queued too
     // long prior to display.

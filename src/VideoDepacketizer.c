@@ -241,6 +241,8 @@ bool LiWaitForNextVideoFrame(VIDEO_FRAME_HANDLE* frameHandle, PDECODE_UNIT* deco
         return false;
     }
 
+    qdu->decodeUnit.dequeueTimeUs = PltGetMicroseconds();
+    qdu->decodeUnit.queueDepthAfterDequeue = LbqGetItemCount(&decodeUnitQueue);
     validateDecodeUnitForPlayback(&qdu->decodeUnit);
 
     *frameHandle = qdu;
@@ -256,6 +258,8 @@ bool LiPollNextVideoFrame(VIDEO_FRAME_HANDLE* frameHandle, PDECODE_UNIT* decodeU
         return false;
     }
 
+    qdu->decodeUnit.dequeueTimeUs = PltGetMicroseconds();
+    qdu->decodeUnit.queueDepthAfterDequeue = LbqGetItemCount(&decodeUnitQueue);
     validateDecodeUnitForPlayback(&qdu->decodeUnit);
 
     *frameHandle = qdu;
@@ -489,6 +493,9 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.presentationTimeUs = firstPacketPresentationTime;
             qdu->decodeUnit.rtpTimestamp = firstPacketRtpTimestamp;
             qdu->decodeUnit.enqueueTimeUs = PltGetMicroseconds();
+            qdu->decodeUnit.dequeueTimeUs = 0;
+            qdu->decodeUnit.queueDepthAtEnqueue = -1;
+            qdu->decodeUnit.queueDepthAfterDequeue = -1;
 
             // These might be wrong for a few frames during a transition between SDR and HDR,
             // but the effects shouldn't very noticable since that's an infrequent operation.
@@ -510,6 +517,11 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             nalChainDataLength = 0;
 
             if ((VideoCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
+                // Capture queue depth immediately before insertion. Do not update the
+                // queued object after LbqOfferQueueItem(), because the consumer may
+                // dequeue it concurrently.
+                qdu->decodeUnit.queueDepthAtEnqueue = LbqGetItemCount(&decodeUnitQueue);
+                qdu->decodeUnit.enqueueTimeUs = PltGetMicroseconds();
                 if (LbqOfferQueueItem(&decodeUnitQueue, qdu, &qdu->entry) == LBQ_BOUND_EXCEEDED) {
                     Limelog("Video decode unit queue overflow\n");
 
