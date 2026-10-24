@@ -246,7 +246,8 @@ static void VideoReceiveThreadProc(void* context) {
         uint64_t diagProcessUs = PltGetMicroseconds() - diagProcessStartUs;
 
         if (diagReceiveGapUs >= 30000 || diagProcessUs >= 5000 || diagPreviousProcessUs >= 5000) {
-            Limelog("DIAG_VIDEO_RX gap_us=%llu prev_process_us=%llu process_us=%llu seq=%u frame=%u bytes=%d queue_status=%d\\n",
+            Limelog("DIAG_VIDEO_RX t_us=%llu gap_us=%llu prev_process_us=%llu process_us=%llu seq=%u frame=%u bytes=%d queue_status=%d\n",
+                    (unsigned long long)diagReceiveReturnUs,
                     (unsigned long long)diagReceiveGapUs,
                     (unsigned long long)diagPreviousProcessUs,
                     (unsigned long long)diagProcessUs,
