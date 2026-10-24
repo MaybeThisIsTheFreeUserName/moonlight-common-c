@@ -241,9 +241,8 @@ static void VideoReceiveThreadProc(void* context) {
             PNV_VIDEO_PACKET diagNvPacket = (PNV_VIDEO_PACKET)(((char*)packet) + diagPayloadOffset);
             diagFrameIndex = LE32(diagNvPacket->frameIndex);
         }
-        uint64_t diagProcessStartUs = diagReceiveReturnUs;
         queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
-        uint64_t diagProcessUs = PltGetMicroseconds() - diagProcessStartUs;
+        uint64_t diagProcessUs = PltGetMicroseconds() - diagReceiveReturnUs;
 
         if (diagReceiveGapUs >= 30000 || diagProcessUs >= 5000 || diagPreviousProcessUs >= 5000) {
             Limelog("DIAG_VIDEO_RX t_us=%llu gap_us=%llu prev_process_us=%llu process_us=%llu seq=%u frame=%u bytes=%d queue_status=%d\n",
